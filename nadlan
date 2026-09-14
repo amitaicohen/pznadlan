@@ -1,0 +1,417 @@
+mkdir -p pisgat-zeev-realestate-agents/src
+cd pisgat-zeev-realestate-agents
+
+# 1. requirements.txt
+cat << 'EOF' > requirements.txt
+pyspark>=3.5.0
+pydantic>=2.7.0
+google-genai>=0.1.1
+playwright>=1.43.0
+pandas>=2.2.0
+pyarrow>=15.0.0
+python-dotenv>=1.0.1
+EOF
+
+# 2. .gitignore
+cat << 'EOF' > .gitignore
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+.env
+raw_listings.json
+*.log
+spark-warehouse/
+metastore_db/
+derby.log
+EOF
+
+# 3. .env.example
+cat << 'EOF' > .env.example
+GEMINI_API_KEY=your_gemini_api_key_here
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SENDER_EMAIL=your_email@gmail.com
+SENDER_PASSWORD=your_app_password
+RECIPIENT_EMAIL=your_email@gmail.com
+EOF
+
+# 4. README.md
+cat << 'EOF' > README.md
+# Pisgat Ze'ev Real Estate Scanner & Multi-Agent Pipeline
+
+מערכת מבוססת סוכנים לאיתור, סינון, ניתוח ודירוג מודעות נדל"ן בפסגת זאב (מעל 120 מ"ר או 6 חדרים).
+
+## תכונות המערכת
+- **סריקה אוטומטית:** מבוססת Playwright תוך האזנה לתעבורת ה-JSON של האתר.
+- **ניתוח איכותני (LLM + Pydantic):** חילוץ מאפיינים מובטחים (ממ"ד, מרפסת היקפית/גינה, נגישות, מצב שיפוץ).
+- **עיבוד מקבילי (PySpark):** הפעלת מנוע הניתוח בעזרת Apache Spark ו-Pandas UDF.
+- **התראות מייל מעוצבות:** שליחת סיכום HTML עם קישור וציון התאמה לכל נכס.
+
+## התקנה והרצה
+1. התקנת תלויות:
+   \`\`\`bash
+   pip install -r requirements.txt
+   playwright install chromium
+   \`\`\`
+2. העתקת \`.env.example\` לקובץ \`.env\` והגדרת המפתחות.
+3. הרצה:
+   \`\`\`bash
+   python main.py
+   \`\`\`
+EOF
+
+# 5. src/__init__.py
+touch src/__init__.py
+
+# 6. src/matcher.py
+cat << 'EOF' > src/matcher.py
+from typing import Optional, Literal, List
+from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
+
+class PropertyFeatures(BaseModel):
+    has_mamad: bool = Field(description="האם יש בדירה ממ\"ד")
+    has_garden_or_wrap_balcony: bool = Field(description="האם יש גינה או מרפסת היקפית רחבה")
+    outdoor_space_type: Literal["גינה", "מרפסת היקפית", "מרפסת רגילה", "ללא"]
+    property_condition: Literal["חדש מקבלן", "משופץ מהיסוד", "משופץ חלקית", "שמור", "דורש שיפוץ", "לא ידוע"]
+    construction_year: Optional[int] = None
+    large_rooms: bool = Field(description="האם החדרים מרווחים וגדולים")
+    physical_accessibility: Literal["מעולה", "בינונית", "מוגבלת", "לא ידוע"]
+    transit_accessibility: Literal["מעולה", "טובה", "רגילה", "רחוק"]
+    summary_pros: List[str]
+    summary_cons: List[str]
+
+def calculate_match_score(features: PropertyFeatures) -> int:
+    score = 0
+    if features.has_garden_or_wrap_balcony:
+        score += 25
+    elif features.outdoor_space_type == "מרפסת רגילה":
+        score += 10
+
+    if features.has_mamad:
+        score += 20
+
+    if features.property_condition in ["חדש מקבלן", "משופץ מהיסוד"]:
+        score += 20
+    elif features.property_condition == "משופץ חלקית":
+        score += 12
+    elif features.property_condition == "שמור":
+        score += 6
+
+    if features.construction_year and features.construction_year >= 2010:
+        score = min(100, score + 5)
+
+    if features.large_rooms:
+        score += 15
+
+    if features.physical_accessibility == "מעולה":
+        score += 10
+    elif features.physical_accessibility == "בינונית":
+        score += 5
+
+    if features.transit_accessibility == "מעולה":
+        score += 10
+    elif features.transit_accessibility == "טובה":
+        score += 6
+    elif features.transit_accessibility == "רגילה":
+        score += 3
+
+    return min(100, score)
+
+def analyze_property(raw_text: str) -> tuple[PropertyFeatures, int]:
+    client = genai.Client()
+    prompt = f"""
+אתה סוכן נדל"ן מומחה שמנתח מודעות עבור משפחה המחפשת דירה גדולה בפסגת זאב (מעל 120 מ"ר / 6 חדרים).
+דרישות קריטיות: גינה או מרפסת היקפית, ממ"ד, מצב משופץ ומעלה, חדרים גדולים, נגישות מעולה ותחבורה.
+
+נתח את המודעה וחלץ את המאפיינים במדויק:
+{raw_text}
+"""
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=PropertyFeatures,
+            temperature=0.1
+        ),
+    )
+    features = PropertyFeatures.model_validate_json(response.text)
+    score = calculate_match_score(features)
+    return features, score
+EOF
+
+# 7. src/scraper.py
+cat << 'EOF' > src/scraper.py
+import asyncio
+import json
+from playwright.async_api import async_playwright
+
+SEARCH_URL = "https://www.yad2.co.il/realestate/forsale?topArea=1&area=2&city=3000&neighborhood=1055&rooms=6--1&squaremeter=120--1"
+
+async def scrape_pisgat_zeev_listings(output_file: str = "raw_listings.json") -> list:
+    captured = []
+
+    async def handle_response(response):
+        if "feed" in response.url or "items" in response.url:
+            try:
+                if "application/json" in response.headers.get("content-type", ""):
+                    data = await response.json()
+                    items = data.get("data", {}).get("feed", {}).get("feed_items", [])
+                    for item in items:
+                        if item.get("type") == "ad":
+                            captured.append({
+                                "id": str(item.get("id")),
+                                "street": item.get("street", "לא צוין"),
+                                "rooms": item.get("rooms", 0),
+                                "sqm": item.get("square_meters", 0),
+                                "price": str(item.get("price", "לא צוין")),
+                                "description": (item.get("description") or "") + " " + (item.get("search_text") or ""),
+                                "link": f"https://www.yad2.co.il/item/{item.get('id')}"
+                            })
+            except Exception:
+                pass
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
+            locale="he-IL",
+            viewport={"width": 1280, "height": 800}
+        )
+        page = await context.new_page()
+        page.on("response", handle_response)
+
+        try:
+            await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=45000)
+            for _ in range(3):
+                await page.mouse.wheel(0, 1200)
+                await asyncio.sleep(2)
+        except Exception as e:
+            print(f"הסריקה נתקלה בשגיאה: {e}")
+        finally:
+            await browser.close()
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(captured, f, ensure_ascii=False, indent=2)
+
+    return captured
+EOF
+
+# 8. src/notifier.py
+cat << 'EOF' > src/notifier.py
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+def send_alert_email(matches: list):
+    if not matches:
+        print("לא נמצאו נכסים העומדים בסף ההתאמה (70+). המייל בוטל.")
+        return
+
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    sender_email = os.getenv("SENDER_EMAIL")
+    sender_password = os.getenv("SENDER_PASSWORD")
+    recipient_email = os.getenv("RECIPIENT_EMAIL", sender_email)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🏠 נמצאו {len(matches)} נכסים רלוונטיים בפסגת זאב (ציון 70+)"
+    msg["From"] = sender_email
+    msg["To"] = recipient_email
+
+    cards_html = ""
+    for prop in matches:
+        pros_li = "".join([f"<li>{p}</li>" for p in prop.get("pros", [])])
+        cons_li = "".join([f"<li>{c}</li>" for c in prop.get("cons", [])])
+
+        cards_html += f"""
+        <div style="border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-family: Arial, sans-serif; direction: rtl; text-align: right; background-color: #fafafa;">
+            <h3 style="margin-top: 0; color: #1a73e8;">
+                {prop['street']} | {prop['rooms']} חדרים | {prop['sqm']} מ"ר
+                <span style="background-color: #34a853; color: white; padding: 4px 8px; border-radius: 4px; font-size: 14px; float: left;">
+                    ציון: {prop['score']}/100
+                </span>
+            </h3>
+            <p><strong>מחיר:</strong> {prop['price']}</p>
+            <p><strong>ממ"ד:</strong> {'כן ✅' if prop['has_mamad'] else 'אין/לא צוין ❌'} | <strong>שטח חוץ:</strong> {prop['outdoor_type']} | <strong>מצב:</strong> {prop['condition']}</p>
+            <div style="background-color: #fff; padding: 10px; border-radius: 4px; border: 1px solid #eee;">
+                <p style="margin: 4px 0; color: #2e7d32;"><strong>יתרונות:</strong></p>
+                <ul style="margin: 0; padding-right: 20px;">{pros_li}</ul>
+                <p style="margin: 4px 0; color: #c62828;"><strong>לבירור:</strong></p>
+                <ul style="margin: 0; padding-right: 20px;">{cons_li}</ul>
+            </div>
+            <p style="margin-top: 12px; font-size: 13px; color: #555;"><strong>תיאור מלא:</strong><br>{prop['description']}</p>
+            <p><a href="{prop['link']}" style="display: inline-block; padding: 8px 16px; background-color: #1a73e8; color: white; text-decoration: none; border-radius: 4px;">צפייה במודעה המקורית</a></p>
+        </div>
+        """
+
+    full_html = f"""
+    <html dir="rtl">
+    <body>
+        <h2>דוח סריקת נדל"ן — פסגת זאב</h2>
+        <p>להלן הנכסים שעברו את סף הסינון:</p>
+        {cards_html}
+    </body>
+    </html>
+    """
+
+    msg.attach(MIMEText(full_html, "html"))
+
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, recipient_email, msg.as_string())
+    print(f"המייל נשלח בהצלחה ל-{recipient_email}.")
+EOF
+
+# 9. src/spark_pipeline.py
+cat << 'EOF' > src/spark_pipeline.py
+import json
+import pandas as pd
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import pandas_udf
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    StringType,
+    IntegerType,
+    BooleanType,
+    ArrayType,
+)
+from src.matcher import analyze_property
+
+spark_output_schema = StructType([
+    StructField("score", IntegerType(), False),
+    StructField("has_mamad", BooleanType(), False),
+    StructField("outdoor_type", StringType(), False),
+    StructField("condition", StringType(), False),
+    StructField("pros", ArrayType(StringType()), False),
+    StructField("cons", ArrayType(StringType()), False),
+])
+
+@pandas_udf(spark_output_schema)
+def analyze_descriptions_udf(descriptions: pd.Series) -> pd.DataFrame:
+    scores, mamads, outdoors, conditions, all_pros, all_cons = [], [], [], [], [], []
+
+    for text in descriptions:
+        try:
+            features, score = analyze_property(str(text))
+            scores.append(score)
+            mamads.append(features.has_mamad)
+            outdoors.append(features.outdoor_space_type)
+            conditions.append(features.property_condition)
+            all_pros.append(features.summary_pros)
+            all_cons.append(features.summary_cons)
+        except Exception:
+            scores.append(0)
+            mamads.append(False)
+            outdoors.append("לא ידוע")
+            conditions.append("לא ידוע")
+            all_pros.append([])
+            all_cons.append(["שגיאה בניתוח"])
+
+    return pd.DataFrame({
+        "score": scores,
+        "has_mamad": mamads,
+        "outdoor_type": outdoors,
+        "condition": conditions,
+        "pros": all_pros,
+        "cons": all_cons,
+    })
+
+def run_spark_analysis(listings_data: list, min_score: int = 70) -> list:
+    spark = SparkSession.builder \
+        .appName("PisgatZeevRealEstateEngine") \
+        .master("local[*]") \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+        .getOrCreate()
+
+    rdd = spark.sparkContext.parallelize([json.dumps(d) for d in listings_data])
+    df = spark.read.json(rdd)
+
+    df_evaluated = df.withColumn("eval", analyze_descriptions_udf("description"))
+    qualified_df = df_evaluated.filter(f"eval.score >= {min_score}").orderBy("eval.score", ascending=False)
+
+    rows = qualified_df.collect()
+    results = []
+    for r in rows:
+        item = r.asDict(recursive=True)
+        eval_data = item.pop("eval", {})
+        item.update(eval_data)
+        results.append(item)
+
+    spark.stop()
+    return results
+EOF
+
+# 10. main.py
+cat << 'EOF' > main.py
+import os
+import json
+import asyncio
+from dotenv import load_dotenv
+from src.scraper import scrape_pisgat_zeev_listings
+from src.spark_pipeline import run_spark_analysis
+from src.notifier import send_alert_email
+
+load_dotenv()
+
+async def main():
+    print("1. הפעלת סוכן הסריקה (Playwright)...")
+    listings = await scrape_pisgat_zeev_listings("raw_listings.json")
+
+    if not listings:
+        print("לא נלכדו מודעות חיות, עובר להרצת מודעות בדיקה...")
+        listings = [
+            {
+                "id": "1",
+                "street": "פסגת זאב מרכז",
+                "rooms": 6,
+                "sqm": 145,
+                "price": "3,400,000 ₪",
+                "link": "https://example.com/1",
+                "description": "דירת 6 חדרים מרווחת, משופצת מהיסוד, מרפסת היקפית ענקית 40 מ\"ר, ממ\"ד, גישה נוחה לרכבת הקלה ומעלית."
+            },
+            {
+                "id": "2",
+                "street": "פסגת זאב צפון",
+                "rooms": 4,
+                "sqm": 125,
+                "price": "2,450,000 ₪",
+                "link": "https://example.com/2",
+                "description": "4 חדרים, קומה 3 בלי מעלית, דורשת שיפוץ יסודי, אין ממ\"ד."
+            }
+        ]
+
+    print(f"2. מעבד {len(listings)} מודעות ב-Apache Spark עם LLM UDF...")
+    matched_properties = run_spark_analysis(listings, min_score=70)
+
+    print(f"3. נמצאו {len(matched_properties)} נכסים מתאימים. שולח דוח בדוא\"ל...")
+    send_alert_email(matched_properties)
+    print("התהליך הושלם בהצלחה.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+
+# אתחול Git ו-Commit ראשוני
+git init
+git add .
+git commit -m "Initial commit: Pisgat Ze'ev real estate multi-agent pipeline with Spark, Pydantic and Playwright"
+git branch -M main
+
+echo "--------------------------------------------------------"
+echo "✅ הפרויקט הוקם והקודים אוגדו בהצלחה!"
+echo "כעת פתח Repository חדש ב-GitHub והרץ:"
+echo "git remote add origin https://github.com/<USERNAME>/<REPO_NAME>.git"
+echo "git push -u origin main"
+echo "--------------------------------------------------------"

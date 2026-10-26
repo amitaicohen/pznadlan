@@ -1,20 +1,20 @@
 import trimesh
 import numpy as np
 
-# פרמטרים
-BASE_THICKNESS = 4.0      # 4 מ"מ עובי בסיס[cite: 2]
-EMBOSS_HEIGHT = 1.2       # 1.2 מ"מ גובה הבלטה[cite: 1, 2]
-GRID_SPACING_X = 48.0
+# פרמטרים הנדסיים גלובליים
+BASE_THICKNESS = 4.0      # עובי הבסיס במ"מ
+EMBOSS_HEIGHT = 1.2       # גובה הבלטת הטקסט והאייקונים במ"מ
+GRID_SPACING_X = 48.0     # מרווח בלוח
 GRID_SPACING_Y = 68.0
 
 def make_keychain_mesh():
-    """יוצר מחזיק מפתחות בסיסי בפורמט תלת-ממדי עמיד"""
-    # בסיס מלבני מעוגל
+    """יוצר מחזיק מפתחות בסיסי בתלת-ממד"""
+    # בסיס מלבני
     base = trimesh.creation.box(extents=[34, 52, BASE_THICKNESS])
     base.apply_translation([0, 0, BASE_THICKNESS / 2])
     
-    # טבעת למפתחות בחלק העליון (קוטר 8 מ"מ עם חור 4.5 מ"מ)[cite: 2]
-    ring = trimesh.creation.annulus(r_min=2.25, r_max=4.0, height=BASE_THICKNESS)[cite: 2]
+    # טבעת למפתחות בחלק העליון (קוטר 8 מ"מ עם חור 4.5 מ"מ)
+    ring = trimesh.creation.annulus(r_min=2.25, r_max=4.0, height=BASE_THICKNESS)
     ring.apply_translation([0, 26, BASE_THICKNESS / 2])
     
     # הבלטה של סמל/טקסט מעל הבסיס

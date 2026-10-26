@@ -3,9 +3,9 @@ import cadquery as cq
 # ==========================================
 # פרמטרים הנדסיים גלובליים להדפסה
 # ==========================================
-BASE_THICKNESS = 4.0      # עובי הבסיס במ"מ
-EMBOSS_HEIGHT = 1.2       # גובה הבלטת הטקסט והאייקונים במ"מ
-TOTAL_HEIGHT = BASE_THICKNESS + EMBOSS_HEIGHT # total: 5.2mm
+BASE_THICKNESS = 4.0      # עובי הבסיס במ"מ[cite: 2]
+EMBOSS_HEIGHT = 1.2       # גובה הבלטת הטקסט והאייקונים במ"מ[cite: 1, 2]
+TOTAL_HEIGHT = BASE_THICKNESS + EMBOSS_HEIGHT # 5.2 מ"מ[cite: 1, 2]
 
 RING_OUTER_R = 4.0        # רדיוס חיצוני של חור הטבעת (קוטר 8 מ"מ)[cite: 2]
 RING_INNER_R = 2.25       # רדיוס חור פנימי (קוטר 4.5 מ"מ)[cite: 2]
@@ -80,7 +80,7 @@ def make_kc_1():
     return base.union(stripes)
 
 def make_kc_2():
-    """2. מלבן + "זהירות בדרכים" ותמרור"""
+    """2. מלבן + זהירות בדרכים ותמרור"""
     base = create_rect_base()
     tri = (
         cq.Workplane("XY")
@@ -127,7 +127,7 @@ def make_kc_4():
     return base.union(inner_tri)
 
 def make_kc_5():
-    """5. תמרור עגול + "עצור"""
+    """5. תמרור עגול + עצור"""
     base = cq.Workplane("XY").circle(19).extrude(BASE_THICKNESS)
     base = add_keychain_ring(base, 19)
     txt = (
@@ -174,7 +174,7 @@ def make_kc_8():
     return base.union(wheels)
 
 def make_kc_9():
-    """9. תמניון + "בטיחות""""
+    """9. תמניון + בטיחות"""
     base = (
         cq.Workplane("XY")
         .polygon(8, 36)

@@ -174,7 +174,6 @@ def make_kc_8():
     return base.union(wheels)
 
 def make_kc_9():
-    """9. תמניון + בטיחות"""
     base = (
         cq.Workplane("XY")
         .polygon(8, 36)
